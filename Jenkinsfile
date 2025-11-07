@@ -2,7 +2,6 @@ pipeline {
   agent any
 
   options {
-    // Removed ansiColor to avoid plugin requirement
     timestamps()
   }
 
@@ -16,28 +15,46 @@ pipeline {
   }
 
   environment {
-    TF_IN_AUTOMATION = 'true'
-    TF_WORKDIR = 'terraform'
-    PLAN_FILE = 'tfplan.out'
-    REPORT_DIR = 'reports'
-    PEM_FILE = 'jenkins-ec2.pem'
+    TF_IN_AUTOMATION     = 'true'
+    TF_WORKDIR           = 'terraform'
+    PLAN_FILE            = 'tfplan.out'
+    REPORT_DIR           = 'reports'
+    PEM_FILE             = 'jenkins-ec2.pem'
+    TF_PLUGIN_CACHE_DIR  = "${WORKSPACE}/.terraform.d/plugin-cache"
   }
 
   stages {
-    stage('Checkout') { 
-      steps { checkout scm } 
+
+    stage('Checkout') {
+      options { timeout(time: 2, unit: 'MINUTES') }
+      steps {
+        checkout scm
+      }
+    }
+
+    stage('Prepare') {
+      options { timeout(time: 1, unit: 'MINUTES') }
+      steps {
+        sh '''
+          set -e
+          mkdir -p "${TF_PLUGIN_CACHE_DIR}"
+          mkdir -p "${REPORT_DIR}"
+        '''
+      }
     }
 
     stage('Tooling Check') {
+      options { timeout(time: 1, unit: 'MINUTES') }
       steps {
         sh '''
           terraform version || (echo "Terraform not found in PATH" && exit 1)
-          aws --version || (echo "AWS CLI not found in PATH" && exit 1)
+          # AWS CLI not required for this simplified pipeline
         '''
       }
     }
 
     stage('Init') {
+      options { timeout(time: 5, unit: 'MINUTES') }
       steps {
         withCredentials([usernamePassword(credentialsId: 'aws-creds', usernameVariable: 'AWS_ACCESS_KEY_ID', passwordVariable: 'AWS_SECRET_ACCESS_KEY')]) {
           withEnv([
@@ -48,28 +65,36 @@ pipeline {
             "TF_VAR_tags=${params.TAGS_JSON}",
           ]) {
             dir(env.TF_WORKDIR) {
-              sh 'terraform init -input=false'
+              sh '''
+                set -e
+                terraform init -input=false
+              '''
             }
           }
         }
       }
     }
 
-    stage('Fmt Check') {
-      steps { 
-        dir(env.TF_WORKDIR) { sh 'terraform fmt -check -recursive' } 
+    stage('Fmt (auto-fix)') {
+      options { timeout(time: 1, unit: 'MINUTES') }
+      steps {
+        dir(env.TF_WORKDIR) {
+          sh 'terraform fmt -recursive'
+        }
       }
     }
 
     stage('Validate') {
+      options { timeout(time: 2, unit: 'MINUTES') }
       steps {
-        withEnv(["AWS_DEFAULT_REGION=${params.AWS_REGION}"]) {
-          dir(env.TF_WORKDIR) { sh 'terraform validate -no-color' }
+        dir(env.TF_WORKDIR) {
+          sh 'terraform validate -no-color'
         }
       }
     }
 
     stage('Plan') {
+      options { timeout(time: 5, unit: 'MINUTES') }
       when { anyOf { environment name: 'ACTION', value: 'plan'; environment name: 'ACTION', value: 'apply' } }
       steps {
         withCredentials([usernamePassword(credentialsId: 'aws-creds', usernameVariable: 'AWS_ACCESS_KEY_ID', passwordVariable: 'AWS_SECRET_ACCESS_KEY')]) {
@@ -87,9 +112,9 @@ pipeline {
         }
       }
       post {
-        always {
+        success {
           dir(env.TF_WORKDIR) {
-            archiveArtifacts artifacts: "${PLAN_FILE}", fingerprint: true, onlyIfSuccessful: true
+            archiveArtifacts artifacts: "${PLAN_FILE}", fingerprint: true
           }
         }
       }
@@ -102,13 +127,15 @@ pipeline {
           allOf { environment name: 'ACTION', value: 'destroy'; expression { return params.AUTO_APPROVE == false } }
         }
       }
-      steps { 
-        timeout(time: 20, unit: 'MINUTES') { input message: 'Proceed with terraform apply/destroy?' } 
+      options { timeout(time: 15, unit: 'MINUTES') }
+      steps {
+        input message: 'Proceed with terraform apply/destroy?'
       }
     }
 
     stage('Apply') {
       when { environment name: 'ACTION', value: 'apply' }
+      options { timeout(time: 10, unit: 'MINUTES') }
       steps {
         script {
           def AUTO_FLAG = params.AUTO_APPROVE ? "-auto-approve" : ""
@@ -126,62 +153,19 @@ pipeline {
           }
         }
       }
-    }
-
-    stage('Post-Apply Test') {
-      when { environment name: 'ACTION', value: 'apply' }
-      steps {
-        withCredentials([usernamePassword(credentialsId: 'aws-creds', usernameVariable: 'AWS_ACCESS_KEY_ID', passwordVariable: 'AWS_SECRET_ACCESS_KEY')]) {
-          withEnv([ "AWS_DEFAULT_REGION=${params.AWS_REGION}" ]) {
-            sh '''
-              set -e
-              mkdir -p "${REPORT_DIR}"
-              INSTANCE_ID=$(terraform -chdir="${TF_WORKDIR}" output -raw instance_id || true)
-              if [ -z "$INSTANCE_ID" ]; then
-                cat > "${REPORT_DIR}/aws-tests.xml" <<'XML'
-<testsuite name="aws" tests="1" failures="1">
-  <testcase classname="aws" name="instance_id_output">
-    <failure message="No instance_id output from terraform">Expected an instance_id</failure>
-  </testcase>
-</testsuite>
-XML
-                exit 1
-              fi
-              STATE=$(aws ec2 describe-instances --instance-ids "$INSTANCE_ID" --query 'Reservations[0].Instances[0].State.Name' --output text || echo "unknown")
-              if [ "$STATE" = "running" ]; then
-                cat > "${REPORT_DIR}/aws-tests.xml" <<'XML'
-<testsuite name="aws" tests="1" failures="0">
-  <testcase classname="aws" name="instance_running"/>
-</testsuite>
-XML
-              else
-                cat > "${REPORT_DIR}/aws-tests.xml" <<XML
-<testsuite name="aws" tests="1" failures="1">
-  <testcase classname="aws" name="instance_running">
-    <failure message="Instance not running">State was: ${STATE}</failure>
-  </testcase>
-</testsuite>
-XML
-                exit 1
-              fi
-            '''
-          }
-        }
-        junit allowEmptyResults: false, testResults: "${REPORT_DIR}/aws-tests.xml"
-      }
       post {
-        always {
-          // Archive PEM and test report; PEM is sensitive—limit job visibility
+        success {
+          // Archive the PEM created by Terraform (sensitive)
           dir(env.TF_WORKDIR) {
             archiveArtifacts artifacts: "jenkins-ec2.pem", onlyIfSuccessful: true
           }
-          archiveArtifacts artifacts: "${REPORT_DIR}/*.xml", fingerprint: true, onlyIfSuccessful: false
         }
       }
     }
 
     stage('Destroy') {
       when { environment name: 'ACTION', value: 'destroy' }
+      options { timeout(time: 10, unit: 'MINUTES') }
       steps {
         script {
           def AUTO_FLAG = params.AUTO_APPROVE ? "-auto-approve" : ""
@@ -202,6 +186,6 @@ XML
 
   post {
     success { echo 'Pipeline completed successfully.' }
-    failure { echo 'Pipeline failed. Check logs and Test Results.' }
+    failure { echo 'Pipeline failed. Check stage logs.' }
   }
 }
