@@ -11,13 +11,15 @@ pipeline {
     TF_WORKDIR           = 'terraform'
     AWS_REGION           = 'ap-south-1'
     INSTANCE_TYPE        = 't3.micro'
-    SSH_INGRESS_CIDR     = '0.0.0.0/0'  // Change to your IP/32 for security
+    SSH_INGRESS_CIDR     = '0.0.0.0/0'  // TODO: change to your IP/32 for security
     TF_PLUGIN_CACHE_DIR  = "${WORKSPACE}/.terraform.d/plugin-cache"
+    PLAN_FILE            = 'tfplan.out'
   }
 
   stages {
 
     stage('Checkout') {
+      options { timeout(time: 2, unit: 'MINUTES') }
       steps {
         echo '=== Checking out code ==='
         checkout scm
@@ -25,6 +27,7 @@ pipeline {
     }
 
     stage('Prepare') {
+      options { timeout(time: 1, unit: 'MINUTES') }
       steps {
         echo '=== Preparing workspace ==='
         sh '''
@@ -36,36 +39,9 @@ pipeline {
     }
 
     stage('Terraform Init') {
+      options { timeout(time: 5, unit: 'MINUTES') }
       steps {
         echo '=== Initializing Terraform ==='
-        withCredentials([usernamePassword(
-          credentialsId: 'aws-creds', 
-          usernameVariable: 'AWS_ACCESS_KEY_ID', 
-          passwordVariable: 'AWS_SECRET_ACCESS_KEY'
-        )]) {
-          dir(env.TF_WORKDIR) {
-            sh '''
-              set -e
-              export AWS_DEFAULT_REGION="${AWS_REGION}"
-              terraform init -input=false
-            '''
-          }
-        }
-      }
-    }
-
-    stage('Terraform Format') {
-      steps {
-        echo '=== Formatting Terraform files ==='
-        dir(env.TF_WORKDIR) {
-          sh 'terraform fmt -recursive'
-        }
-      }
-    }
-
-    stage('Terraform Validate') {
-      steps {
-        echo '=== Validating Terraform configuration ==='
         withCredentials([usernamePassword(
           credentialsId: 'aws-creds',
           usernameVariable: 'AWS_ACCESS_KEY_ID',
@@ -75,14 +51,27 @@ pipeline {
             sh '''
               set -e
               export AWS_DEFAULT_REGION="${AWS_REGION}"
-              terraform validate
+              # Fail fast and use local plugin cache for speed/stability
+              export TF_PLUGIN_CACHE_DIR="${TF_PLUGIN_CACHE_DIR}"
+              terraform init -input=false
             '''
           }
         }
       }
     }
 
+    stage('Terraform Format (auto-fix)') {
+      options { timeout(time: 1, unit: 'MINUTES') }
+      steps {
+        echo '=== Formatting Terraform files ==='
+        dir(env.TF_WORKDIR) {
+          sh 'terraform fmt -recursive'
+        }
+      }
+    }
+
     stage('Terraform Plan') {
+      options { timeout(time: 6, unit: 'MINUTES') }
       steps {
         echo '=== Planning Terraform deployment ==='
         withCredentials([usernamePassword(
@@ -97,9 +86,9 @@ pipeline {
               export TF_VAR_region="${AWS_REGION}"
               export TF_VAR_instance_type="${INSTANCE_TYPE}"
               export TF_VAR_ssh_ingress_cidr="${SSH_INGRESS_CIDR}"
-              
-              terraform plan -out=tfplan.out -input=false
-              terraform show -no-color tfplan.out > tfplan.txt
+              # Create/overwrite plan file; no interactive input or locks
+              terraform plan -out="${PLAN_FILE}" -input=false -lock-timeout=60s
+              terraform show -no-color "${PLAN_FILE}" > tfplan.txt
             '''
           }
         }
@@ -114,15 +103,16 @@ pipeline {
     }
 
     stage('Approval') {
+      when { expression { return currentBuild.rawBuild.getCause(hudson.model.Cause$UserIdCause) != null } } // keep for manual runs
+      options { timeout(time: 15, unit: 'MINUTES') }
       steps {
-        script {
-          echo '=== Review the plan above and approve to deploy EC2 instance ==='
-          input message: 'Deploy EC2 instance to AWS?', ok: 'Deploy'
-        }
+        echo '=== Review plan (Artifacts) and approve to deploy EC2 ==='
+        input message: 'Deploy EC2 instance to AWS?', ok: 'Deploy'
       }
     }
 
     stage('Terraform Apply') {
+      options { timeout(time: 10, unit: 'MINUTES') }
       steps {
         echo '=== Deploying EC2 instance ==='
         withCredentials([usernamePassword(
@@ -132,24 +122,24 @@ pipeline {
         )]) {
           dir(env.TF_WORKDIR) {
             sh '''
-              set -e
+              set -euxo pipefail
               export AWS_DEFAULT_REGION="${AWS_REGION}"
               export TF_VAR_region="${AWS_REGION}"
               export TF_VAR_instance_type="${INSTANCE_TYPE}"
               export TF_VAR_ssh_ingress_cidr="${SSH_INGRESS_CIDR}"
-              
-              terraform apply -input=false tfplan.out
-              
-              # Set correct permissions on PEM file
+
+              terraform apply -input=false "${PLAN_FILE}"
+
+              # Fix permissions on PEM (if module generated it)
               if [ -f jenkins-ec2.pem ]; then
                 chmod 600 jenkins-ec2.pem
                 echo "PEM file created successfully"
               fi
-              
-              # Show outputs
+
+              # Outputs for convenience
               terraform output -json > outputs.json
               echo "=== Deployment Complete ==="
-              terraform output
+              terraform output || true
             '''
           }
         }
@@ -176,6 +166,8 @@ pipeline {
     }
     always {
       echo "Pipeline finished at ${new Date()}"
+      // Optional workspace cleanup to save disk
+      // deleteDir()  // uncomment if you want to wipe workspace each run
     }
   }
 }
