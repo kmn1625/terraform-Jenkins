@@ -36,6 +36,13 @@ pipeline {
           dir('terraform') {
             sh '''
               export AWS_DEFAULT_REGION=ap-south-1
+
+              # REQUIRED variables for terraform
+              export TF_VAR_region="ap-south-1"
+              export TF_VAR_instance_type="t3.micro"
+              export TF_VAR_ssh_ingress_cidr="0.0.0.0/0"
+              export TF_VAR_tags='{"Project":"JenkinsTF","Env":"Dev"}'
+
               terraform plan -out=tfplan.out -input=false
             '''
           }
@@ -53,9 +60,14 @@ pipeline {
           dir('terraform') {
             sh '''
               export AWS_DEFAULT_REGION=ap-south-1
+
+              export TF_VAR_region="ap-south-1"
+              export TF_VAR_instance_type="t3.micro"
+              export TF_VAR_ssh_ingress_cidr="0.0.0.0/0"
+              export TF_VAR_tags='{"Project":"JenkinsTF","Env":"Dev"}'
+
               terraform apply -auto-approve tfplan.out
 
-              # Fix key permissions if pem exists
               if [ -f jenkins-ec2.pem ]; then chmod 600 jenkins-ec2.pem; fi
 
               terraform output -json > outputs.json
