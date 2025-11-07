@@ -1,6 +1,4 @@
- File 1: Jenkinsfile
 
-Create a file named `Jenkinsfile` in your project root:
 
 pipeline {
     agent any
