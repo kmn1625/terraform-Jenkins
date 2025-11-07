@@ -2,7 +2,7 @@ pipeline {
   agent any
 
   options {
-    ansiColor('xterm')
+    // Removed ansiColor to avoid plugin requirement
     timestamps()
   }
 
@@ -24,7 +24,9 @@ pipeline {
   }
 
   stages {
-    stage('Checkout') { steps { checkout scm } }
+    stage('Checkout') { 
+      steps { checkout scm } 
+    }
 
     stage('Tooling Check') {
       steps {
@@ -54,7 +56,9 @@ pipeline {
     }
 
     stage('Fmt Check') {
-      steps { dir(env.TF_WORKDIR) { sh 'terraform fmt -check -recursive' } }
+      steps { 
+        dir(env.TF_WORKDIR) { sh 'terraform fmt -check -recursive' } 
+      }
     }
 
     stage('Validate') {
@@ -98,21 +102,26 @@ pipeline {
           allOf { environment name: 'ACTION', value: 'destroy'; expression { return params.AUTO_APPROVE == false } }
         }
       }
-      steps { timeout(time: 20, unit: 'MINUTES') { input message: 'Proceed with terraform apply/destroy?' } }
+      steps { 
+        timeout(time: 20, unit: 'MINUTES') { input message: 'Proceed with terraform apply/destroy?' } 
+      }
     }
 
     stage('Apply') {
       when { environment name: 'ACTION', value: 'apply' }
       steps {
-        withCredentials([usernamePassword(credentialsId: 'aws-creds', usernameVariable: 'AWS_ACCESS_KEY_ID', passwordVariable: 'AWS_SECRET_ACCESS_KEY')]) {
-          withEnv([ "AWS_DEFAULT_REGION=${params.AWS_REGION}" ]) {
-            dir(env.TF_WORKDIR) {
-              sh '''
-                set -euxo pipefail
-                terraform apply -input=false ${AUTO_APPROVE ? "-auto-approve" : ""} "${PLAN_FILE}"
-                # Ensure the PEM is 0600 for SSH clients
-                if [ -f "${PEM_FILE}" ]; then chmod 600 "${PEM_FILE}"; fi
-              '''
+        script {
+          def AUTO_FLAG = params.AUTO_APPROVE ? "-auto-approve" : ""
+          withCredentials([usernamePassword(credentialsId: 'aws-creds', usernameVariable: 'AWS_ACCESS_KEY_ID', passwordVariable: 'AWS_SECRET_ACCESS_KEY')]) {
+            withEnv([ "AWS_DEFAULT_REGION=${params.AWS_REGION}" ]) {
+              dir(env.TF_WORKDIR) {
+                sh """
+                  set -euxo pipefail
+                  terraform apply -input=false ${AUTO_FLAG} "${PLAN_FILE}"
+                  # Ensure the PEM is 0600 for SSH clients
+                  if [ -f "${PEM_FILE}" ]; then chmod 600 "${PEM_FILE}"; fi
+                """
+              }
             }
           }
         }
@@ -174,10 +183,16 @@ XML
     stage('Destroy') {
       when { environment name: 'ACTION', value: 'destroy' }
       steps {
-        withCredentials([usernamePassword(credentialsId: 'aws-creds', usernameVariable: 'AWS_ACCESS_KEY_ID', passwordVariable: 'AWS_SECRET_ACCESS_KEY')]) {
-          withEnv([ "AWS_DEFAULT_REGION=${params.AWS_REGION}" ]) {
-            dir(env.TF_WORKDIR) {
-              sh 'terraform destroy -input=false ${AUTO_APPROVE ? "-auto-approve" : ""}'
+        script {
+          def AUTO_FLAG = params.AUTO_APPROVE ? "-auto-approve" : ""
+          withCredentials([usernamePassword(credentialsId: 'aws-creds', usernameVariable: 'AWS_ACCESS_KEY_ID', passwordVariable: 'AWS_SECRET_ACCESS_KEY')]) {
+            withEnv([ "AWS_DEFAULT_REGION=${params.AWS_REGION}" ]) {
+              dir(env.TF_WORKDIR) {
+                sh """
+                  set -euxo pipefail
+                  terraform destroy -input=false ${AUTO_FLAG}
+                """
+              }
             }
           }
         }
