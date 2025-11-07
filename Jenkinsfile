@@ -4,7 +4,7 @@ pipeline {
     environment {
         // Set the AWS credentials ID that you configured in Jenkins
         // Go to: Jenkins > Manage Jenkins > Credentials > Add AWS credentials
-        AWS_CREDENTIALS = credentials('aws-credentials-id')
+        AWS_CREDENTIALS = credentials('aws-creds')
         AWS_DEFAULT_REGION = 'us-east-1'  // Change to your preferred region
     }
     
