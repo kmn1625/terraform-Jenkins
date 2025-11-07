@@ -1,4 +1,4 @@
- AWS Region where resources will be created
+# AWS Region where resources will be created
 # Common regions: us-east-1 (Virginia), us-west-2 (Oregon), ap-south-1 (Mumbai)
 variable "aws_region" {
   description = "AWS region to create resources"
