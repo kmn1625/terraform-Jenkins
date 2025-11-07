@@ -4,7 +4,7 @@ pipeline {
     environment {
         // Set the AWS credentials ID that you configured in Jenkins
         // Go to: Jenkins > Manage Jenkins > Credentials > Add AWS credentials
-        AWS_CREDENTIALS = credentials('aws-creds')
+        AWS_CREDENTIALS = credentials('aws-credentials-id')
         AWS_DEFAULT_REGION = 'us-east-1'  // Change to your preferred region
     }
     
@@ -22,10 +22,13 @@ pipeline {
             steps {
                 // Initialize Terraform - downloads required provider plugins (AWS)
                 // This must run before any other Terraform commands
+                // We navigate to terraform folder first since that's where .tf files are
                 echo 'Initializing Terraform...'
-                sh '''
-                    terraform init
-                '''
+                dir('terraform') {
+                    sh '''
+                        terraform init
+                    '''
+                }
             }
         }
         
@@ -35,9 +38,11 @@ pipeline {
                 // This is a "dry run" to see changes before applying them
                 // Helps catch errors before creating actual resources
                 echo 'Creating Terraform execution plan...'
-                sh '''
-                    terraform plan -out=tfplan
-                '''
+                dir('terraform') {
+                    sh '''
+                        terraform plan -out=tfplan
+                    '''
+                }
             }
         }
         
@@ -46,9 +51,11 @@ pipeline {
                 // Apply the changes - actually creates the EC2 instance and key pair
                 // The -auto-approve flag skips the manual confirmation
                 echo 'Applying Terraform changes to create EC2 instance...'
-                sh '''
-                    terraform apply -auto-approve tfplan
-                '''
+                dir('terraform') {
+                    sh '''
+                        terraform apply -auto-approve tfplan
+                    '''
+                }
             }
         }
         
@@ -56,14 +63,16 @@ pipeline {
             steps {
                 // Extract the private key from Terraform output and save it
                 // This creates the .pem file you need to SSH into your EC2 instance
-                // The key is saved in Jenkins workspace for download
+                // The key is saved in Jenkins workspace root for easy download
                 echo 'Extracting and saving PEM key file...'
-                sh '''
-                    terraform output -raw private_key > my-ec2-key.pem
-                    chmod 400 my-ec2-key.pem
-                    echo "PEM key saved as: my-ec2-key.pem"
-                    echo "You can download this file from Jenkins workspace"
-                '''
+                dir('terraform') {
+                    sh '''
+                        terraform output -raw private_key > ../my-ec2-key.pem
+                        chmod 400 ../my-ec2-key.pem
+                        echo "PEM key saved as: my-ec2-key.pem in workspace root"
+                        echo "You can download this file from Jenkins workspace"
+                    '''
+                }
             }
         }
         
@@ -72,16 +81,18 @@ pipeline {
                 // Show the EC2 instance details so you can connect to it
                 // Displays public IP and the SSH command to use
                 echo 'EC2 Instance created successfully!'
-                sh '''
-                    echo "=========================="
-                    echo "EC2 Instance Information:"
-                    echo "=========================="
-                    terraform output
-                    echo ""
-                    echo "To download PEM key: Check Jenkins workspace for my-ec2-key.pem"
-                    echo "To connect via SSH, use:"
-                    echo "ssh -i my-ec2-key.pem ec2-user@$(terraform output -raw instance_public_ip)"
-                '''
+                dir('terraform') {
+                    sh '''
+                        echo "=========================="
+                        echo "EC2 Instance Information:"
+                        echo "=========================="
+                        terraform output
+                        echo ""
+                        echo "To download PEM key: Check Jenkins workspace for my-ec2-key.pem"
+                        echo "To connect via SSH, use:"
+                        echo "ssh -i my-ec2-key.pem ec2-user@$(terraform output -raw instance_public_ip)"
+                    '''
+                }
             }
         }
     }
@@ -100,6 +111,7 @@ pipeline {
         always {
             // Always archive the PEM key file so you can download it
             // Go to Jenkins job > Build # > Workspace to download
+            // Note: PEM file is saved in workspace root, not in terraform folder
             archiveArtifacts artifacts: 'my-ec2-key.pem', allowEmptyArchive: true
         }
     }
