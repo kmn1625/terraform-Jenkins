@@ -87,8 +87,19 @@ pipeline {
     stage('Validate') {
       options { timeout(time: 2, unit: 'MINUTES') }
       steps {
-        dir(env.TF_WORKDIR) {
-          sh 'terraform validate -no-color'
+        // FIX: Added credentials and environment variables
+        withCredentials([usernamePassword(credentialsId: 'aws-creds', usernameVariable: 'AWS_ACCESS_KEY_ID', passwordVariable: 'AWS_SECRET_ACCESS_KEY')]) {
+          withEnv([
+            "AWS_DEFAULT_REGION=${params.AWS_REGION}",
+            "TF_VAR_region=${params.AWS_REGION}",
+            "TF_VAR_instance_type=${params.INSTANCE_TYPE}",
+            "TF_VAR_ssh_ingress_cidr=${params.SSH_INGRESS_CIDR}",
+            "TF_VAR_tags=${params.TAGS_JSON}",
+          ]) {
+            dir(env.TF_WORKDIR) {
+              sh 'terraform validate -no-color'
+            }
+          }
         }
       }
     }
