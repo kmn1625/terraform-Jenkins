@@ -1,211 +1,85 @@
-terraform {
-  required_version = ">= 1.5.0"
-  required_providers {
-    aws = {
-      source  = "hashicorp/aws"
-      version = "~> 5.0"
-    }
-    tls = {
-      source  = "hashicorp/tls"
-      version = "~> 4.0"
-    }
-    local = {
-      source  = "hashicorp/local"
-      version = "~> 2.0"
-    }
-  }
-}
-
+# Configure the AWS Provider
+# This tells Terraform to use AWS and which region to create resources in
 provider "aws" {
-  region = var.region
-  
-  default_tags {
-    tags = {
-      ManagedBy = "Terraform"
-      Pipeline  = "Jenkins"
-    }
-  }
+  region = var.aws_region
 }
 
-# Get latest Ubuntu 22.04 LTS AMI
-data "aws_ami" "ubuntu_2204" {
-  most_recent = true
-  owners      = ["099720109477"] # Canonical
-
-  filter {
-    name   = "name"
-    values = ["ubuntu/images/hvm-ssd/ubuntu-jammy-22.04-amd64-server-*"]
-  }
-
-  filter {
-    name   = "virtualization-type"
-    values = ["hvm"]
-  }
-
-  filter {
-    name   = "root-device-type"
-    values = ["ebs"]
-  }
-
-  filter {
-    name   = "state"
-    values = ["available"]
-  }
-}
-
-# Use default VPC
-data "aws_vpc" "default" {
-  default = true
-}
-
-data "aws_subnets" "default" {
-  filter {
-    name   = "vpc-id"
-    values = [data.aws_vpc.default.id]
-  }
-}
-
-# Generate SSH key pair
-resource "tls_private_key" "ssh" {
+# Generate a new private key
+# This creates a new RSA key pair (private and public keys)
+# The private key will be used to connect to your EC2 instance via SSH
+resource "tls_private_key" "ec2_key" {
   algorithm = "RSA"
   rsa_bits  = 4096
 }
 
-resource "aws_key_pair" "generated" {
-  key_name   = "jenkins-ec2-key-${formatdate("YYYYMMDD-hhmm", timestamp())}"
-  public_key = tls_private_key.ssh.public_key_openssh
-
-  tags = merge(
-    var.tags,
-    {
-      Name = "jenkins-generated-keypair"
-    }
-  )
-
-  lifecycle {
-    ignore_changes = [key_name]
-  }
+# Create AWS Key Pair using the generated public key
+# This uploads the public key to AWS so it can be assigned to your EC2 instance
+resource "aws_key_pair" "ec2_key_pair" {
+  key_name   = var.key_name
+  public_key = tls_private_key.ec2_key.public_key_openssh
 }
 
-# Save private key locally (Jenkins will archive this)
-resource "local_sensitive_file" "pem" {
-  filename        = "${path.module}/jenkins-ec2.pem"
-  content         = tls_private_key.ssh.private_key_pem
-  file_permission = "0600"
-}
-
-# Security group for SSH access
+# Create a Security Group to control traffic to the EC2 instance
+# This acts as a virtual firewall for your instance
 resource "aws_security_group" "ec2_sg" {
-  name_prefix = "jenkins-tf-ec2-"
-  description = "Allow SSH access to EC2 instance"
-  vpc_id      = data.aws_vpc.default.id
+  name        = "${var.instance_name}-sg"
+  description = "Security group for EC2 instance - allows SSH access"
 
+  # Ingress rule - allows incoming SSH traffic (port 22)
+  # This lets you connect to your instance from anywhere
+  # WARNING: 0.0.0.0/0 allows access from any IP - restrict this in production!
   ingress {
     description = "SSH access"
     from_port   = 22
     to_port     = 22
     protocol    = "tcp"
-    cidr_blocks = [var.ssh_ingress_cidr]
+    cidr_blocks = ["0.0.0.0/0"]  # Change to your IP for better security: ["YOUR_IP/32"]
   }
 
+  # Egress rule - allows all outgoing traffic
+  # This lets your instance connect to the internet and download updates
   egress {
-    description      = "Allow all outbound"
-    from_port        = 0
-    to_port          = 0
-    protocol         = "-1"
-    cidr_blocks      = ["0.0.0.0/0"]
-    ipv6_cidr_blocks = ["::/0"]
+    description = "Allow all outbound traffic"
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"  # -1 means all protocols
+    cidr_blocks = ["0.0.0.0/0"]
   }
 
-  tags = merge(
-    var.tags,
-    {
-      Name = "jenkins-tf-ec2-sg"
-    }
-  )
-
-  lifecycle {
-    create_before_destroy = true
+  tags = {
+    Name = "${var.instance_name}-security-group"
   }
 }
 
-# EC2 Instance
-resource "aws_instance" "vm" {
-  ami                         = data.aws_ami.ubuntu_2204.id
-  instance_type               = var.instance_type
-  subnet_id                   = element(data.aws_subnets.default.ids, 0)
-  vpc_security_group_ids      = [aws_security_group.ec2_sg.id]
-  associate_public_ip_address = true
-  key_name                    = aws_key_pair.generated.key_name
+# Create the EC2 Instance
+# This is the actual virtual machine that will be created in AWS
+resource "aws_instance" "web_server" {
+  # AMI (Amazon Machine Image) - the operating system image
+  # This uses Amazon Linux 2023 - you can change to Ubuntu or other OS
+  ami           = var.ami_id
+  
+  # Instance type - defines CPU, memory, and network capacity
+  # t2.micro is free tier eligible (750 hours/month free for 12 months)
+  instance_type = var.instance_type
+  
+  # Associate the key pair we created above
+  # This allows you to SSH into the instance using the private key
+  key_name      = aws_key_pair.ec2_key_pair.key_name
+  
+  # Associate the security group we created above
+  # This applies the firewall rules to allow SSH access
+  vpc_security_group_ids = [aws_security_group.ec2_sg.id]
 
+  # Root volume configuration - the main disk for your instance
   root_block_device {
-    volume_type           = "gp3"
-    volume_size           = 8
-    delete_on_termination = true
-    encrypted             = true
+    volume_size = 8  # Size in GB - 8GB is usually enough for basic usage
+    volume_type = "gp3"  # General Purpose SSD
   }
 
-  user_data = <<-EOF
-              #!/bin/bash
-              set -e
-              
-              # Update system
-              apt-get update
-              
-              # Set hostname
-              hostnamectl set-hostname jenkins-terraform-vm
-              
-              # Create MOTD
-              cat > /etc/motd << 'MOTD'
-              ================================================
-              Welcome to Jenkins-Terraform Provisioned VM
-              OS: Ubuntu 22.04 LTS
-              Provisioned: $(date)
-              ================================================
-              MOTD
-              
-              echo "VM provisioned successfully" > /var/log/terraform-init.log
-              EOF
-
-  tags = merge(
-    var.tags,
-    {
-      Name = "jenkins-terraform-ubuntu-vm"
-    }
-  )
-
-  lifecycle {
-    ignore_changes = [user_data]
+  # Tags to identify your instance in AWS console
+  tags = {
+    Name        = var.instance_name
+    Environment = "Development"
+    ManagedBy   = "Terraform"
   }
-}
-
-# Output the connection details
-output "instance_id" {
-  description = "EC2 Instance ID"
-  value       = aws_instance.vm.id
-}
-
-output "instance_public_ip" {
-  description = "Public IP address"
-  value       = aws_instance.vm.public_ip
-}
-
-output "instance_public_dns" {
-  description = "Public DNS name"
-  value       = aws_instance.vm.public_dns
-}
-
-output "ssh_command" {
-  description = "SSH command to connect"
-  value       = "ssh -i jenkins-ec2.pem ubuntu@${aws_instance.vm.public_ip}"
-}
-
-output "security_group_id" {
-  description = "Security Group ID"
-  value       = aws_security_group.ec2_sg.id
-}
-
-output "key_pair_name" {
-  description = "Name of the generated key pair"
-  value       = aws_key_pair.generated.key_name
 }
