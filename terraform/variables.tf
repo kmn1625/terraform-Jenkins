@@ -19,7 +19,7 @@ variable "ssh_ingress_cidr" {
 variable "tags" {
   description = "Extra resource tags as a JSON map"
   type        = map(string)
-  default     = {
+  default = {
     Project = "JenkinsTF"
     Env     = "Dev"
   }

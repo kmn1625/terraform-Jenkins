@@ -130,6 +130,6 @@ output "public_ip" {
 }
 
 output "ssh_command" {
-  value = "ssh -i ${path.module}/jenkins-ec2.pem ubuntu@${aws_instance.vm.public_ip}"
+  value       = "ssh -i ${path.module}/jenkins-ec2.pem ubuntu@${aws_instance.vm.public_ip}"
   description = "SSH command (download PEM from Jenkins artifacts first)"
 }
